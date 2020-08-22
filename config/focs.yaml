@@ -1,0 +1,48 @@
+model_name: focs
+data:
+  train_annotation_path: /home/huffman/data/annotations/instances_train2017.json
+#  train_annotation_path: /home/huffman/data/annotations/instances_val2017.json
+  val_annotation_path: /home/huffman/data/annotations/instances_val2017.json
+#  train_img_root: /home/huffman/data/val2017
+  train_img_root: /home/huffman/data/train2017
+  val_img_root: /home/huffman/data/val2017
+  img_size: 640
+  use_crowd: False
+  batch_size: 8
+  num_workers: 4
+  debug: False
+  remove_blank: Ture
+
+model:
+  num_cls: 80
+  strides: [8, 16, 32, 64, 128]
+  backbone: resnet50
+  backbone_weight: weights/resnet50.pth
+  freeze_bn: False
+
+hyper_params:
+  alpha: 0.25
+  gamma: 2.0
+  multi_scale: [640]
+  layer_limits: [64, 128, 256, 512]
+  radius: 3
+
+optim:
+  optimizer: Adam
+  lr: 0.0001
+  momentum: 0.9
+  milestones: [12,]
+  cosine_weights: 1.0
+  warm_up_epoch: 0.
+  max_norm: 2
+  weight_decay: 0.0001
+  epochs: 18
+  sync_bn: True
+val:
+  interval: 1
+  weight_path: weights
+  conf_thresh: 0.05
+  iou_thresh: 0.5
+  max_det: 300
+
+gpus: 4,5,6,7
