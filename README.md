@@ -1,5 +1,9 @@
 # ATSS_FCOS_Lite
 
+this repository is an unofficial implement of atss_fcos_lite,we train this model on coco using 4 gpus 8images per gpu.
+the resolution of image is 640 x 640.we get this resolution by fix the long side to be 640px and keep the width/height 
+ratio.finally we pad the short side to get the square shape.some data augmentation like color jitter,scale jitter,rand 
+geometric transformation,mosaic augmentation,rand noise were used on training.the final map on COCO is 36.6
 
 ## performance on COCO
 ```shell script
