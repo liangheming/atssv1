@@ -2,75 +2,118 @@ import math
 import random
 import cv2 as cv
 import numpy as np
+from copy import deepcopy
+
+cv.setNumThreads(0)
 
 
-class DetectAugment(object):
+class BoxInfo(object):
+    def __init__(self, img_path, boxes=None, labels=None, weights=None, padding_val=(103, 116, 123)):
+        super(BoxInfo, self).__init__()
+        self.img_path = img_path
+        self.img = None
+        self.boxes = boxes
+        self.labels = labels
+        self.weights = weights
+        self.padding_val = padding_val
+
+    def revise(self):
+        if self.boxes is None:
+            self.boxes = np.zeros(shape=(0, 4))
+        if self.labels is None:
+            self.labels = np.zeros(shape=(0,))
+        if self.weights is None:
+            self.weights = np.ones(shape=(0,))
+
+    def clone(self):
+        return deepcopy(self)
+
+    def load_img(self):
+        self.img = cv.imread(self.img_path)
+        return self
+
+    def draw_box(self, colors, names):
+        if self.img is None:
+            return None
+        ret_img = self.img.copy()
+        if self.boxes is None or len(self.boxes) == 0:
+            return ret_img
+
+        if self.weights is None:
+            self.weights = np.ones_like(self.labels)
+
+        for label_idx, weight, (x1, y1, x2, y2) in zip(self.labels, self.weights, self.boxes):
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            cv.rectangle(ret_img, (x1, y1), (x2, y2), color=colors[int(label_idx)], thickness=2)
+            cv.putText(ret_img, "{:s}".format(names[int(label_idx)]),
+                       (x1, y1 + 5),
+                       cv.FONT_HERSHEY_SIMPLEX,
+                       0.5,
+                       colors[int(label_idx)], 2)
+            cv.putText(ret_img, "{:.2f}".format(weight),
+                       (x1, y1 + 15),
+                       cv.FONT_HERSHEY_SIMPLEX,
+                       0.5,
+                       colors[int(label_idx)], 1)
+        return ret_img
+
+
+class BasicTransform(object):
     def __init__(self, p=0.5):
-        super(DetectAugment, self).__init__()
         self.p = p
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
         pass
 
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        pass
-
-    def __call__(self, img: np.ndarray, labels: np.ndarray):
-        """
-        :param img: np.ndarray (BGR) 模型 (直接使用opencv进行读取)
-        :param labels: [box_num,6] (weights,label_idx,x1,y1,x2,y2) 其中坐标为原图上坐标(不需要normalize到[0，1])
-        :return:
-        """
+    def __call__(self, box_info: BoxInfo) -> BoxInfo:
+        assert box_info.img is not None, "please load in img first"
         aug_p = np.random.uniform()
-        labels = labels.copy()
         if aug_p <= self.p:
-            img, labels = self.aug(img, labels)
-        return img, labels
+            box_info = self.aug(box_info)
+        return box_info
+
+    def reset(self, **settings):
+        p = settings.get('p', None)
+        if p is not None:
+            self.p = p
+        return self
 
 
-class Identity(DetectAugment):
-    """
-    恒等增强
-    """
-
+class Identity(BasicTransform):
     def __init__(self, **kwargs):
+        kwargs['p'] = 1.0
         super(Identity, self).__init__(**kwargs)
-        self.p = 1
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
-        return img
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        return img, labels
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        return box_info
 
 
-class RandNoise(DetectAugment):
-    """
-    随机加入噪声
-    """
-
+class RandNoise(BasicTransform):
     def __init__(self, **kwargs):
+        kwargs['p'] = 1.0
         super(RandNoise, self).__init__(**kwargs)
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def img_aug(img):
         mu = 0
+        pre_type = img.dtype
         sigma = np.random.uniform(1, 15)
-        img = np.array(img, dtype=np.float32)
-        img += np.random.normal(mu, sigma, img.shape)
-        img = img.clip(0., 255.).astype(dtype=np.uint8)
-        return img
+        ret_img = img + np.random.normal(mu, sigma, img.shape)
+        ret_img = ret_img.clip(0., 255.).astype(pre_type)
+        return ret_img
 
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        img = self.img_aug(img)
-        return img, labels
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        box_info.img = self.img_aug(box_info.img)
+        return box_info
 
 
-class RandBlur(DetectAugment):
+class RandBlur(BasicTransform):
     """
     随机进行模糊
     """
 
     def __init__(self, **kwargs):
+        kwargs['p'] = 1.0
         super(RandBlur, self).__init__(**kwargs)
 
     @staticmethod
@@ -96,18 +139,19 @@ class RandBlur(DetectAugment):
         img = aug_blur(img)
         return img
 
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        img = self.img_aug(img)
-        return img, labels
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        box_info.img = self.img_aug(box_info.img)
+        return box_info
 
 
-class HSV(DetectAugment):
+class RandHSV(BasicTransform):
     """
     color jitter
     """
 
     def __init__(self, hgain=0.5, sgain=0.5, vgain=0.5, **kwargs):
-        super(HSV, self).__init__(**kwargs)
+        kwargs['p'] = 1.0
+        super(RandHSV, self).__init__(**kwargs)
         self.hgain = hgain
         self.sgain = sgain
         self.vgain = vgain
@@ -124,91 +168,91 @@ class HSV(DetectAugment):
         ret_img = cv.cvtColor(img_hsv, cv.COLOR_HSV2BGR)
         return ret_img
 
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        img = self.img_aug(img)
-        return img, labels
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        box_info.img = self.img_aug(box_info.img)
+        return box_info
 
 
-class ScaleNoPadding(DetectAugment):
-    """
-    等比缩放长边至指定尺寸，不进行padding
-    """
+class RandScaleToMax(BasicTransform):
+    def __init__(self, max_threshes,
+                 pad_to_square=True,
+                 minimum_rectangle=False,
+                 scale_up=True,
+                 division=64,
+                 **kwargs):
+        kwargs['p'] = 1.0
+        super(RandScaleToMax, self).__init__(**kwargs)
+        assert isinstance(max_threshes, list)
+        self.max_threshes = max_threshes
+        self.pad_to_square = pad_to_square
+        self.minimum_rectangle = minimum_rectangle
+        self.scale_up = scale_up
+        self.division = division
 
-    def __init__(self, target_size=640, **kwargs):
-        super(ScaleNoPadding, self).__init__(**kwargs)
-        self.p = 1
-        self.target_size = target_size
-
-    def scale_img(self, img):
+    def make_border(self, img: np.ndarray, max_thresh, border_val):
         h, w = img.shape[:2]
-        r = min(self.target_size / h, self.target_size / w)
+        r = min(max_thresh / h, max_thresh / w)
+        if not self.scale_up:
+            r = min(r, 1.0)
+        new_w, new_h = int(round(w * r)), int(round(h * r))
+        if r != 1.0:
+            img = cv.resize(img, (new_w, new_h), interpolation=cv.INTER_LINEAR)
+        if not self.pad_to_square:
+            return img, r, (0, 0)
+        dw, dh = int(max_thresh - new_w), int(max_thresh - new_h)
+        if self.minimum_rectangle:
+            dw, dh = np.mod(dw, self.division), np.mod(dh, self.division)
+        dw /= 2
+        dh /= 2
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        img = cv.copyMakeBorder(img, top, bottom, left, right, cv.BORDER_CONSTANT, value=border_val)
+        return img, r, (left, top)
+
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        max_thresh = np.random.choice(self.max_threshes)
+        img, r, (left, top) = self.make_border(box_info.img, max_thresh, box_info.padding_val)
+        box_info.img = img
+        if box_info.boxes is not None and len(box_info.boxes):
+            box_info.boxes = box_info.boxes * r
+            box_info.boxes[:, [0, 2]] = box_info.boxes[:, [0, 2]] + left
+            box_info.boxes[:, [1, 3]] = box_info.boxes[:, [1, 3]] + top
+        return box_info
+
+    def reset(self, **settings):
+        super(RandScaleToMax, self).reset(**settings)
+        max_threshes = settings.get('max_threshes', None)
+        if max_threshes is not None:
+            self.max_threshes = max_threshes
+        return self
+
+
+class RandScaleMinMax(BasicTransform):
+    def __init__(self, min_threshes, max_thresh=1024, **kwargs):
+        kwargs['p'] = 1.0
+        super(RandScaleMinMax, self).__init__(**kwargs)
+        assert isinstance(min_threshes, list)
+        self.min_threshes = min_threshes
+        self.max_thresh = max_thresh
+
+    def scale_img(self, img: np.ndarray, min_thresh):
+        h, w = img.shape[:2]
+        min_side, max_side = min(h, w), max(h, w)
+        r = min(min_thresh / min_side, self.max_thresh / max_side)
         if r != 1:
             img = cv.resize(img, (int(round(w * r)), int(round(h * r))), interpolation=cv.INTER_LINEAR)
         return img, r
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
-        img, _ = self.scale_img(img)
-        return img
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        img, ratio = self.scale_img(img)
-        if labels.shape[0] > 0:
-            labels[:, 2:] = ratio * labels[:, 2:]
-        return img, labels
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        min_thresh = np.random.choice(self.min_threshes)
+        img, ratio = self.scale_img(box_info.img, min_thresh)
+        box_info.img = img
+        if box_info.boxes is not None and len(box_info.boxes):
+            box_info.boxes = box_info.boxes * ratio
+        return box_info
 
 
-class ScalePadding(DetectAugment):
-    """
-    等比缩放长边至指定尺寸，padding短边部分
-    """
-
-    def __init__(self, target_size=(640, 640),
-                 padding_val=(114, 114, 114),
-                 minimum_rectangle=False,
-                 scale_up=True, **kwargs):
-        super(ScalePadding, self).__init__(**kwargs)
-        self.p = 1
-        self.new_shape = target_size
-        self.padding_val = padding_val
-        self.minimum_rectangle = minimum_rectangle
-        self.scale_up = scale_up
-
-    def make_border(self, img: np.ndarray):
-        # h,w
-        shape = img.shape[:2]
-        if isinstance(self.new_shape, int):
-            self.new_shape = (self.new_shape, self.new_shape)
-        r = min(self.new_shape[1] / shape[0], self.new_shape[0] / shape[1])
-        if not self.scale_up:
-            r = min(r, 1.0)
-        ratio = r, r
-        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
-        dw, dh = self.new_shape[0] - new_unpad[0], self.new_shape[1] - new_unpad[1]
-        if self.minimum_rectangle:
-            dw, dh = np.mod(dw, 64), np.mod(dh, 64)
-
-        dw /= 2
-        dh /= 2
-        if shape[::-1] != new_unpad:
-            img = cv.resize(img, new_unpad, interpolation=cv.INTER_LINEAR)
-        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-        img = cv.copyMakeBorder(img, top, bottom, left, right, cv.BORDER_CONSTANT, value=self.padding_val)
-        return img, ratio, (left, top)
-
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
-        img, _, _ = self.make_border(img)
-        return img
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        img, ratio, (left, top) = self.make_border(img)
-        if labels.shape[0] > 0:
-            labels[:, [2, 4]] = ratio[0] * labels[:, [2, 4]] + left
-            labels[:, [3, 5]] = ratio[1] * labels[:, [3, 5]] + top
-        return img, labels
-
-
-class LRFlip(DetectAugment):
+class LRFlip(BasicTransform):
     """
     左右翻转
     """
@@ -216,19 +260,20 @@ class LRFlip(DetectAugment):
     def __init__(self, **kwargs):
         super(LRFlip, self).__init__(**kwargs)
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def img_aug(img: np.ndarray) -> np.ndarray:
         img = np.fliplr(img)
         return img
 
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        h, w = img.shape[:2]
-        img = self.img_aug(img)
-        if labels.shape[0] > 0:
-            labels[:, [4, 2]] = w - labels[:, [2, 4]]
-        return img, labels
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        _, w = box_info.img.shape[:2]
+        box_info.img = self.img_aug(box_info.img)
+        if box_info.boxes is not None and len(box_info.boxes):
+            box_info.boxes[:, [2, 0]] = w - box_info.boxes[:, [0, 2]]
+        return box_info
 
 
-class UDFlip(DetectAugment):
+class UDFlip(BasicTransform):
     """
     上下翻转
     """
@@ -236,129 +281,70 @@ class UDFlip(DetectAugment):
     def __init__(self, **kwargs):
         super(UDFlip, self).__init__(**kwargs)
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def img_aug(img: np.ndarray) -> np.ndarray:
         img = np.flipud(img)
         return img
 
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        h, w = img.shape[:2]
-        img = self.img_aug(img)
-        if labels.shape[0] > 0:
-            labels[:, [5, 3]] = h - labels[:, [3, 5]]
-        return img, labels
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        h, _ = box_info.img.shape[:2]
+        box_info.img = self.img_aug(box_info.img)
+        if box_info.boxes is not None and len(box_info.boxes):
+            box_info.boxes[:, [3, 1]] = h - box_info.boxes[:, [1, 3]]
+        return box_info
 
 
-class RandAffine(DetectAugment):
-    """
-    随即进行仿射变换
-    """
-
-    def __init__(self, target_size=(640, 640),
-                 degree=(-10, 10),
-                 translate=0.1,
-                 scale=0.1,
-                 shear=5,
-                 pad_val=(114, 114, 114),
-                 border_translate=(0, 0),
-                 **kwargs):
-        super(RandAffine, self).__init__(**kwargs)
-        self.target_size = target_size
-        if isinstance(degree, float) or isinstance(degree, int):
-            assert degree >= 0, 'degree should be positive'
-            degree = (-degree, degree)
-        self.degree = degree
-        self.translate = translate
-        if isinstance(scale, float) or isinstance(scale, int):
-            assert 0 <= scale < 1
-            scale = (1 - scale, 1 + scale)
-        self.scale = scale
-        self.shear = shear
-        self.pad_val = pad_val
-        self.border_translate = border_translate
-
-    def get_transform_matrix(self, img):
-        width, height = self.target_size
-        matrix_r = np.eye(3)
-        angle = np.random.uniform(self.degree[0], self.degree[1])
-        scale = np.random.uniform(self.scale[0], self.scale[1])
-        matrix_r[:2] = cv.getRotationMatrix2D(angle=angle, center=(img.shape[1] / 2, img.shape[0] / 2), scale=scale)
-
-        matrix_t = np.eye(3)
-        matrix_t[0, 2] = np.random.uniform(-self.translate, self.translate) * img.shape[1] + self.border_translate[0]
-        matrix_t[1, 2] = np.random.uniform(-self.translate, self.translate) * img.shape[0] + self.border_translate[1]
-
-        matrix_s = np.eye(3)
-        matrix_s[0, 1] = math.tan(np.random.uniform(-self.shear, self.shear) * math.pi / 180)
-        matrix_s[1, 0] = math.tan(np.random.uniform(-self.shear, self.shear) * math.pi / 180)
-        return matrix_s @ matrix_t @ matrix_r, width, height, scale
-
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
-        transform_matrix, width, height, scale = self.get_transform_matrix(img)
-        # if (transform_matrix != np.eye(3)).any():  # image changed
-        img = cv.warpAffine(img, transform_matrix[:2],
-                            dsize=(width, height),
-                            flags=cv.INTER_LINEAR,
-                            borderValue=self.pad_val)
-        return img
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        transform_matrix, width, height, scale = self.get_transform_matrix(img)
-        # image changed
-        img = cv.warpAffine(img, transform_matrix[:2],
-                            dsize=(width, height),
-                            flags=cv.INTER_LINEAR,
-                            borderValue=self.pad_val)
-        n = len(labels)
-        if n:
-            xy = np.ones((n * 4, 3))
-            xy[:, :2] = labels[:, [2, 3, 4, 5, 2, 5, 4, 3]].reshape(n * 4, 2)
-            xy = (xy @ transform_matrix.T)[:, :2].reshape(n, 8)
-            x = xy[:, [0, 2, 4, 6]]
-            y = xy[:, [1, 3, 5, 7]]
-            xy = np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
-            xy[:, [0, 2]] = xy[:, [0, 2]].clip(0, width)
-            xy[:, [1, 3]] = xy[:, [1, 3]].clip(0, height)
-            w = xy[:, 2] - xy[:, 0]
-            h = xy[:, 3] - xy[:, 1]
-            area = w * h
-            area0 = (labels[:, 4] - labels[:, 2]) * (labels[:, 5] - labels[:, 3])
-            ar = np.maximum(w / (h + 1e-16), h / (w + 1e-16))
-            i = (w > 2) & (h > 2) & (area / (area0 * scale + 1e-16) > 0.2) & (ar < 20)
-            labels = labels[i]
-            labels[:, 2:6] = xy[i]
-        return img, labels
-
-
-class RandPerspective(DetectAugment):
-    """
-    随即进行透视变换
-    """
-
-    def __init__(self, target_size=(640, 640),
-                 degree=(-10, 10),
-                 translate=0.1,
-                 scale=0.1,
-                 shear=5,
-                 pad_val=(114, 114, 114),
+class RandPerspective(BasicTransform):
+    def __init__(self,
+                 target_size=None,
+                 degree=(0, 0),
+                 translate=0,
+                 scale=(1.0, 1.0),
+                 shear=0,
                  perspective=0.0,
                  **kwargs):
+        kwargs['p'] = 1.0
         super(RandPerspective, self).__init__(**kwargs)
+        assert isinstance(target_size, tuple) or target_size is None
+        assert isinstance(degree, tuple)
+        assert isinstance(scale, tuple)
         self.target_size = target_size
-        if isinstance(degree, float) or isinstance(degree, int):
-            assert degree >= 0, 'degree should be positive'
-            degree = (-degree, degree)
         self.degree = degree
         self.translate = translate
-        if isinstance(scale, float) or isinstance(scale, int):
-            assert 0 <= scale < 1
-            scale = (1 - scale, 1 + scale)
         self.scale = scale
         self.shear = shear
-        self.pad_val = pad_val
         self.perspective = perspective
 
+    def reset(self, **settings):
+        super(RandPerspective, self).reset(**settings)
+        target_size = settings.get('target_size', None)
+        degree = settings.get('degree', None)
+        translate = settings.get('translate', None)
+        scale = settings.get('scale', None)
+        shear = settings.get('shear', None)
+        perspective = settings.get('perspective', None)
+        if target_size is not None:
+            assert isinstance(target_size, tuple)
+            self.target_size = target_size
+        if degree is not None:
+            assert isinstance(degree, tuple)
+            self.degree = degree
+        if translate is not None:
+            self.translate = translate
+        if scale is not None:
+            assert isinstance(scale, tuple)
+            self.scale = scale
+        if shear is not None:
+            self.shear = shear
+        if perspective is not None:
+            self.perspective = perspective
+        return self
+
     def get_transform_matrix(self, img):
-        width, height = self.target_size
+        if self.target_size is not None:
+            width, height = self.target_size
+        else:
+            height, width = img.shape[:2]
 
         matrix_c = np.eye(3)
         matrix_c[0, 2] = -img.shape[1] / 2
@@ -382,25 +368,25 @@ class RandPerspective(DetectAugment):
         matrix_s[1, 0] = math.tan(np.random.uniform(-self.shear, self.shear) * math.pi / 180)
         return matrix_t @ matrix_s @ matrix_r @ matrix_p @ matrix_c, width, height, scale
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
-        transform_matrix, width, height, scale = self.get_transform_matrix(img)
-        # if (transform_matrix != np.eye(3)).any():  # image changed
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        transform_matrix, width, height, scale = self.get_transform_matrix(box_info.img)
         if self.perspective:
-            img = cv.warpPerspective(img, transform_matrix, dsize=(width, height), borderValue=self.pad_val)
+            box_info.img = cv.warpPerspective(box_info.img,
+                                              transform_matrix,
+                                              dsize=(width, height),
+                                              borderValue=box_info.padding_val)
         else:  # affine
-            img = cv.warpAffine(img, transform_matrix[:2], dsize=(width, height), borderValue=self.pad_val)
-        return img
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        transform_matrix, width, height, scale = self.get_transform_matrix(img)
-        if self.perspective:
-            img = cv.warpPerspective(img, transform_matrix, dsize=(width, height), borderValue=self.pad_val)
-        else:  # affine
-            img = cv.warpAffine(img, transform_matrix[:2], dsize=(width, height), borderValue=self.pad_val)
-        n = len(labels)
+            box_info.img = cv.warpAffine(box_info.img,
+                                         transform_matrix[:2],
+                                         dsize=(width, height),
+                                         borderValue=box_info.padding_val)
+        if box_info.boxes is None or len(box_info.boxes) == 0:
+            return box_info
+        n = len(box_info.boxes)
         if n:
             xy = np.ones((n * 4, 3))
-            xy[:, :2] = labels[:, [2, 3, 4, 5, 2, 5, 4, 3]].reshape(n * 4, 2)
+            # x1,y1,x2,y2,x1,y2,x2,y1
+            xy[:, :2] = box_info.boxes[:, [0, 1, 2, 3, 0, 3, 2, 1]].reshape(n * 4, 2)
             xy = (xy @ transform_matrix.T)
             if self.perspective:
                 xy = (xy[:, :2] / xy[:, 2:3]).reshape(n, 8)  # rescale
@@ -414,133 +400,61 @@ class RandPerspective(DetectAugment):
             w = xy[:, 2] - xy[:, 0]
             h = xy[:, 3] - xy[:, 1]
             area = w * h
-            area0 = (labels[:, 4] - labels[:, 2]) * (labels[:, 5] - labels[:, 3])
+            area0 = (box_info.boxes[:, 2] - box_info.boxes[:, 0]) * (box_info.boxes[:, 3] - box_info.boxes[:, 1])
             ar = np.maximum(w / (h + 1e-16), h / (w + 1e-16))
             i = (w > 2) & (h > 2) & (area / (area0 * scale + 1e-16) > 0.2) & (ar < 20)
-            labels = labels[i]
-            labels[:, 2:6] = xy[i]
-        return img, labels
+            box_info.boxes = xy[i]
+            if box_info.labels is not None and len(box_info.labels) > 0:
+                box_info.labels = box_info.labels[i]
+            if box_info.weights is not None and len(box_info.weights) > 0:
+                box_info.weights = box_info.weights[i]
+            return box_info
 
 
-class RandCutOut(DetectAugment):
-    def __init__(self, max_cut_time=8, mask_scale=None, **kwargs):
-        super(RandCutOut, self).__init__(**kwargs)
-        assert max_cut_time >= 1
-        self.max_cut_time = max_cut_time
-        if mask_scale is None:
-            mask_scale = [0.5] * 1 + [0.25] * 2 + [0.125] * 4 + [0.0625] * 8 + [0.03125] * 16
-        self.mask_scale = mask_scale
-
-    @staticmethod
-    def bbox_ioa(box1, box2):
-        # Returns the intersection over box2 area given box1, box2. box1 is 4, box2 is nx4. boxes are x1y1x2y2
-        box2 = box2.transpose()
-
-        # Get the coordinates of bounding boxes
-        b1_x1, b1_y1, b1_x2, b1_y2 = box1[0], box1[1], box1[2], box1[3]
-        b2_x1, b2_y1, b2_x2, b2_y2 = box2[0], box2[1], box2[2], box2[3]
-
-        # Intersection area
-        inter_area = (np.minimum(b1_x2, b2_x2) - np.maximum(b1_x1, b2_x1)).clip(0) * \
-                     (np.minimum(b1_y2, b2_y2) - np.maximum(b1_y1, b2_y1)).clip(0)
-
-        # box2 area
-        box2_area = (b2_x2 - b2_x1) * (b2_y2 - b2_y1) + 1e-16
-
-        # Intersection over box2 area
-        return inter_area / box2_area
-
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
-        h, w = img.shape[:2]
-        cut_times = random.randint(1, self.max_cut_time + 1)
-        ret_img = img.copy()
-        for _ in range(cut_times):
-            s = np.random.choice(self.mask_scale)
-            mask_h = random.randint(1, int(h * s))
-            mask_w = random.randint(1, int(w * s))
-
-            x_min = max(0, random.randint(0, w) - mask_w // 2)
-            y_min = max(0, random.randint(0, h) - mask_h // 2)
-            x_max = min(w, x_min + mask_w)
-            y_max = min(h, y_min + mask_h)
-            ret_img[y_min:y_max, x_min, x_max] = [random.randint(64, 191) for _ in range(3)]
-        return ret_img
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        """
-        :param img:
-        :param labels:[weights,label_id,x1,y1,x2,y2]
-        :return:
-        """
-        h, w = img.shape[:2]
-        cut_times = random.randint(1, self.max_cut_time + 1)
-        ret_img = img.copy()
-        for _ in range(cut_times):
-            s = np.random.choice(self.mask_scale)
-            mask_w = random.randint(1, int(w * s))
-            mask_h = random.randint(1, int(h * s))
-
-            x_min = max(0, random.randint(0, w) - mask_w // 2)
-            y_min = max(0, random.randint(0, h) - mask_h // 2)
-            x_max = min(w, x_min + mask_w)
-            y_max = min(h, y_min + mask_h)
-            ret_img[y_min:y_max, x_min:x_max] = [random.randint(64, 191) for _ in range(3)]
-
-            if len(labels) and s > 0.02:
-                box = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
-                ioa = self.bbox_ioa(box, labels[:, 2:6])
-                labels = labels[ioa < 0.60]
-        return ret_img, labels
-
-
-class Mosaic(DetectAugment):
-    """
-    使用马赛克数据增强
-    """
-
-    def __init__(self, candidate_imgs, candidate_labels,
+class Mosaic(BasicTransform):
+    def __init__(self,
+                 candidate_box_info,
                  color_gitter=None,
                  target_size=640,
-                 pad_val=(114, 114, 114), **kwargs):
-        """
-        :param candidate_imgs: 候选图片路径列表
-        :param candidate_labels: 图片对应标注列表
-        :param color_gitter: 单张图片进行马赛克增强前使用的color gitter
-        :param target_size: 长边缩放尺寸
-        :param pad_val: padding部分填充的数值
-        :param kwargs:
-        """
+                 rand_center=True,
+                 translate=0.1,
+                 scale=(0.5, 1.5),
+                 degree=(0, 0),
+                 **kwargs):
+        kwargs['p'] = 1.0
         super(Mosaic, self).__init__(**kwargs)
-        self.p = 1
-        self.candidate_imgs = candidate_imgs
-        self.candidate_labels = candidate_labels
-        self.target_size = target_size
-        self.pad_val = pad_val
-        self.scale_no_pad = ScaleNoPadding(target_size)
-        self.mosaic_border = (-self.target_size // 2, -self.target_size // 2)
+        assert isinstance(candidate_box_info, list)
+        self.candidate_box_info = candidate_box_info
         if color_gitter is None:
             color_gitter = Identity()
         self.color_gitter = color_gitter
-        self.affine = RandPerspective(p=1,
-                                      target_size=(target_size, target_size),
-                                      degree=0,
-                                      translate=0,
-                                      scale=(0.6, 1.2),
-                                      shear=0,
-                                      perspective=0.0,
-                                      pad_val=pad_val,
-                                      )
+        self.target_size = target_size
+        self.rand_center = rand_center
+        self.affine = RandPerspective(target_size=(target_size, target_size),
+                                      translate=translate,
+                                      scale=scale,
+                                      degree=degree)
+        self.scale_max = RandScaleToMax(max_threshes=[target_size], pad_to_square=False)
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
-        yc, xc = [int(random.uniform(-x, 2 * self.target_size + x)) for x in self.mosaic_border]
-        indices = [random.randint(0, len(self.candidate_labels) - 1) for _ in range(3)]
-        img4 = np.ones(shape=(self.target_size * 2, self.target_size * 2, 3))
-        img4 = (img4 * (np.array(self.pad_val)[None, None, :])).astype(np.uint8)
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        mosaic_border = (-self.target_size // 2, -self.target_size // 2)
+        if self.rand_center:
+            yc, xc = [int(random.uniform(-x, 2 * self.target_size + x)) for x in mosaic_border]
+        else:
+            yc, xc = [self.target_size, self.target_size]
+        indices = [random.randint(0, len(self.candidate_box_info) - 1) for _ in range(3)]
+        img4 = np.tile(np.array(box_info.padding_val, dtype=np.uint8)[None, None, :],
+                       (self.target_size * 2, self.target_size * 2, 1))
+        # img4 = np.ones(shape=(self.target_size * 2, self.target_size * 2, 3)) * box_info.PADDING_VAL
+        box_info4 = list()
         for i, index in enumerate([1] + indices):
-            img_i = img if i == 0 else cv.imread(self.candidate_imgs[index])
-            img_i, _ = self.scale_no_pad.scale_img(img_i)
-            img_i, _ = self.color_gitter(img_i, np.zeros(shape=(0, 5), dtype=np.float32))
-            h, w = img_i.shape[:2]
+            if i == 0:
+                box_info_i = box_info
+            else:
+                box_info_i = self.candidate_box_info[index].clone().load_img()
+            box_info_i = self.color_gitter(box_info_i)
+            box_info_i = self.scale_max(box_info_i)
+            h, w = box_info_i.img.shape[:2]
             if i == 0:
                 x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
                 x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
@@ -553,181 +467,165 @@ class Mosaic(DetectAugment):
             else:  # bottom right
                 x1a, y1a, x2a, y2a = xc, yc, min(xc + w, self.target_size * 2), min(self.target_size * 2, yc + h)
                 x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
-            img4[y1a:y2a, x1a:x2a] = img_i[y1b:y2b, x1b:x2b]
-        img4, _ = self.affine(img4, np.zeros((0, 6), dtype=np.float32))
-        return img4
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        yc, xc = [int(random.uniform(-x, 2 * self.target_size + x)) for x in self.mosaic_border]
-        indices = [random.randint(0, len(self.candidate_labels) - 1) for _ in range(3)]
-
-        img4 = np.ones(shape=(self.target_size * 2, self.target_size * 2, 3))
-        img4 = (img4 * (np.array(self.pad_val)[None, None, :])).astype(np.uint8)
-        labels4 = list()
-
-        for i, index in enumerate([1] + indices):
-            img_i = img if i == 0 else cv.imread(self.candidate_imgs[index])
-            labels_i = labels if i == 0 else self.candidate_labels[index]
-            img_i, ratio = self.scale_no_pad.scale_img(img_i)
-            img_i, labels_i = self.color_gitter(img_i, labels_i)
-            h, w = img_i.shape[:2]
-            if i == 0:
-                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
-                x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
-            elif i == 1:  # top right
-                x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, self.target_size * 2), yc
-                x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
-            elif i == 2:  # bottom left
-                x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(self.target_size * 2, yc + h)
-                x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, max(xc, w), min(y2a - y1a, h)
-            else:  # bottom right
-                x1a, y1a, x2a, y2a = xc, yc, min(xc + w, self.target_size * 2), min(self.target_size * 2, yc + h)
-                x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
-            img4[y1a:y2a, x1a:x2a] = img_i[y1b:y2b, x1b:x2b]
+            img4[y1a:y2a, x1a:x2a] = box_info_i.img[y1b:y2b, x1b:x2b]
             padw = x1a - x1b
             padh = y1a - y1b
-            if labels_i.shape[0] > 0:
-                labels_i[:, [2, 4]] = ratio * labels_i[:, [2, 4]] + padw
-                labels_i[:, [3, 5]] = ratio * labels_i[:, [3, 5]] + padh
-                labels4.append(labels_i)
-        if len(labels4):
-            labels4 = np.concatenate(labels4, 0)
-            # np.clip(labels4[:, 1:] - s / 2, 0, s, out=labels4[:, 1:])  # use with center crop
-            np.clip(labels4[:, 2:], 0, 2 * self.target_size, out=labels4[:, 2:])  # use with random_affine
+            if box_info_i.boxes is not None and len(box_info_i.boxes):
+                box_info_i.boxes[:, [0, 2]] = box_info_i.boxes[:, [0, 2]] + padw
+                box_info_i.boxes[:, [1, 3]] = box_info_i.boxes[:, [1, 3]] + padh
+                box_info4.append(box_info_i)
+        box_info.img = img4
+        if len(box_info4):
+            box_4 = np.concatenate([item.boxes for item in box_info4], axis=0)
+            np.clip(box_4, 0, 2 * self.target_size, out=box_4)
+            label_4 = [item.labels for item in box_info4 if item.labels is not None]
+            label_4 = np.concatenate(label_4, axis=0) if len(label_4) > 0 else None
+            weights_4 = [item.weights for item in box_info4 if item.weights is not None]
+            weights_4 = np.concatenate(weights_4, axis=0) if len(weights_4) > 0 else None
+            box_info.boxes = box_4
+            box_info.labels = label_4
+            box_info.weights = weights_4
         else:
-            img4, labels = self.affine(img4, np.zeros((0, 6), dtype=np.float32))
-            return img4, labels
+            return self.affine(box_info)
+        valid_index = np.bitwise_and((box_info.boxes[:, 2] - box_info.boxes[:, 0]) > 2,
+                                     (box_info.boxes[:, 3] - box_info.boxes[:, 1]) > 2)
+        box_info.boxes = box_info.boxes[valid_index, :]
+        if box_info.labels is not None and len(box_info.labels) > 0:
+            box_info.labels = box_info.labels[valid_index]
+        if box_info.weights is not None and len(box_info.weights) > 0:
+            box_info.weights = box_info.weights[valid_index]
+        return self.affine(box_info)
 
-        valid_index = np.bitwise_and((labels4[:, 4] - labels4[:, 2]) > 2, (labels4[:, 5] - labels4[:, 3]) > 2)
-        labels4 = labels4[valid_index, :]
-        img4, labels4 = self.affine(img4, labels4)
-        return img4, labels4
+
+class MosaicWrapper(Mosaic):
+    def __init__(self, sizes, **kwargs):
+        super(MosaicWrapper, self).__init__(**kwargs)
+        self.sizes = sizes
+
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        rand_size = np.random.choice(self.sizes)
+        self.target_size = rand_size
+        self.affine.reset(target_size=(rand_size, rand_size))
+        self.scale_max.reset(max_threshes=[rand_size])
+        return super(MosaicWrapper, self).aug(box_info)
 
 
-class MixUp(DetectAugment):
-    """
-    使用双图混合增强
-    """
-
-    def __init__(self, candidate_imgs,
-                 candidate_labels,
+class MixUp(BasicTransform):
+    def __init__(self,
+                 candidate_box_info,
                  color_gitter=None,
-                 alpha=0.6,
-                 target_size=(640, 640),
-                 pad_val=(114, 114, 114),
-                 **kwargs):
-        """
-        :param candidate_imgs: 候选图片路径列表
-        :param candidate_labels: 图片对应标注列表
-        :param color_gitter: 单张图片进行混合增强前使用的color gitter
-        :param alpha: 混合因子
-        :param target_size: 长边缩放尺寸
-        :param pad_val: padding部分填充的数值
-        :param kwargs:
-        """
+                 mix_ratio=0.5, **kwargs):
+        kwargs['p'] = 1.0
         super(MixUp, self).__init__(**kwargs)
-        self.p = 1
-        self.candidate_imgs = candidate_imgs
-        self.candidate_labels = candidate_labels
+        self.candidate_box_info = candidate_box_info
         if color_gitter is None:
             color_gitter = Identity()
         self.color_gitter = color_gitter
-        self.alpha = alpha
-        self.pad_val = pad_val
-        self.scale_padding = ScalePadding(target_size=target_size, padding_val=pad_val, scale_up=True)
+        self.mix_ratio = mix_ratio
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
-        index = random.randint(0, len(self.candidate_labels) - 1)
-        # alpha = round(np.random.uniform(0.36, 0.64), 2)
-        alpha = self.alpha
-        append_img = cv.imread(self.candidate_imgs[index])
-        append_img, _ = self.color_gitter(append_img, np.zeros(shape=(0, 6), dtype=np.float32))
-        h1, w1 = img.shape[:2]
-        h2, w2 = append_img.shape[:2]
-        temp_img = np.ones(shape=(max(h1, h2), max(w1, w2), 3), dtype=np.float32)
-        img1 = (temp_img * (np.array(self.pad_val)[None, None, :]))
-        img2 = img1.copy()
-        img1[0:h1, 0:w1, :] = img.astype(np.float32)
-        img2[0:h2, 0:w2, :] = append_img.astype(np.float32)
-        mix_img = img1 * alpha + img2 * (1 - alpha)
-        mix_img = mix_img.astype(np.uint8)
-        mix_img, _ = self.scale_padding(mix_img, np.zeros(shape=(0, 6), dtype=np.float32))
-        return mix_img
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        index = random.randint(0, len(self.candidate_labels) - 1)
-        alpha = self.alpha
-        append_img = cv.imread(self.candidate_imgs[index])
-        append_labels = self.candidate_labels[index]
-        append_img, append_labels = self.color_gitter(append_img, append_labels)
-        h1, w1 = img.shape[:2]
-        h2, w2 = append_img.shape[:2]
-        temp_img = np.ones(shape=(max(h1, h2), max(w1, w2), 3), dtype=np.float32)
-        img1 = (temp_img * (np.array(self.pad_val)[None, None, :]))
-        img2 = img1.copy()
-        img1[0:h1, 0:w1, :] = img.astype(np.float32)
-        img2[0:h2, 0:w2, :] = append_img.astype(np.float32)
-
-        mix_img = img1 * alpha + img2 * (1 - alpha)
-        mix_img = mix_img.astype(np.uint8)
-        if len(labels):
-            labels[:, 0] = alpha
-        if len(append_labels):
-            append_labels[:, 0] = 1 - alpha
-        ret_labels = np.concatenate([labels, append_labels], axis=0)
-        mix_img, ret_labels = self.scale_padding(mix_img, ret_labels)
-        return mix_img, ret_labels
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        index = random.randint(0, len(self.candidate_box_info) - 1)
+        append_box_info = self.candidate_box_info[index].clone().load_img()
+        box_info = self.color_gitter(box_info)
+        append_box_info = self.color_gitter(append_box_info)
+        h1, w1 = box_info.img.shape[:2]
+        h2, w2 = append_box_info.img.shape[:2]
+        temp_img = np.tile(np.array(box_info.padding_val, dtype=np.float32)[None, None, :],
+                           (max(h1, h2), max(w1, w2), 1))
+        # temp_img = np.ones(shape=(max(h1, h2), max(w1, w2), 3), dtype=np.float32) * box_info.PADDING_VAL
+        inner_w, inner_h = min(w1, w2), min(h1, h2)
+        temp_img[0:h1, 0:w1, :] = self.mix_ratio * box_info.img
+        temp_img[0:h2, 0:w2, :] = (1 - self.mix_ratio) * append_box_info.img
+        temp_img[0:inner_h, 0:inner_w, :] = self.mix_ratio * box_info.img[0:inner_h, 0:inner_w, :] + (
+                1 - self.mix_ratio) * append_box_info.img[0:inner_h, 0:inner_w, :]
+        box_info.img = temp_img.astype(np.uint8)
+        if box_info.boxes is not None and len(box_info.boxes) > 0:
+            box_info.boxes = np.concatenate([box_info.boxes, append_box_info.boxes], axis=0)
+        if box_info.labels is not None and len(box_info.labels) > 0:
+            box_info.labels = np.concatenate([box_info.labels, append_box_info.labels], axis=0)
+        if box_info.weights is not None and len(box_info.weights) > 0:
+            box_info.weights = np.concatenate([box_info.weights * self.mix_ratio,
+                                               append_box_info.weights * (1 - self.mix_ratio)], axis=0)
+        return box_info
 
 
-class OneOf(DetectAugment):
-    """
-    随即一个增强方式进行增强
-    """
+class MixUpWrapper(MixUp):
+    def __init__(self, beta=(8, 8), **kwargs):
+        super(MixUpWrapper, self).__init__(**kwargs)
+        self.beta = beta
 
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        mix_ratio = np.random.beta(self.beta[0], self.beta[1])
+        self.mix_ratio = mix_ratio
+        return super(MixUpWrapper, self).aug(box_info)
+
+
+class RandCrop(BasicTransform):
+    def __init__(self, min_thresh=0.5, max_thresh=0.8, **kwargs):
+        kwargs['p'] = 1.0
+        super(RandCrop, self).__init__(**kwargs)
+        self.min_thresh = min_thresh
+        self.max_thresh = max_thresh
+
+    def get_crop_area(self, h, w):
+        h_min = self.min_thresh * h if self.min_thresh <= 1 else min(self.min_thresh, h)
+        h_max = self.max_thresh * h if self.max_thresh <= 1 else min(self.max_thresh, h)
+        h_min, h_max = min(h_min, h_max), max(h_min, h_max)
+        w_min = self.min_thresh * w if self.min_thresh <= 1 else min(self.min_thresh, w)
+        w_max = self.max_thresh * w if self.max_thresh <= 1 else min(self.max_thresh, w)
+        w_min, w_max = min(w_min, w_max), max(w_min, w_max)
+        crop_h = int(np.random.uniform(h_min, h_max)) - 1
+        crop_w = int(np.random.uniform(w_min, w_max)) - 1
+        x0 = int(np.random.uniform(0, w - crop_w))
+        y0 = int(np.random.uniform(0, h - crop_h))
+        return x0, y0, crop_w, crop_h
+
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        h, w = box_info.img.shape[:2]
+        x0, y0, crop_w, crop_h = self.get_crop_area(h, w)
+        box_info.img = box_info.img[y0:y0 + crop_h, x0:x0 + crop_w, :]
+        if box_info.boxes is not None and len(box_info.boxes) > 0:
+            cropped_boxes = box_info.boxes - np.array([x0, y0, x0, y0])
+            cropped_boxes[..., [0, 2]] = cropped_boxes[..., [0, 2]].clip(min=0, max=crop_w)
+            cropped_boxes[..., [1, 3]] = cropped_boxes[..., [1, 3]].clip(min=0, max=crop_h)
+            c_w, c_h = (cropped_boxes[:, [2, 3]] - cropped_boxes[:, [0, 1]]).T
+            area0 = (box_info.boxes[:, 2] - box_info.boxes[:, 0]) * (box_info.boxes[:, 3] - box_info.boxes[:, 1])
+            area = c_w * c_h
+            ar = np.maximum(c_w / (c_h + 1e-16), c_h / (c_w + 1e-16))
+            i = (c_w > 2) & (c_w > 2) & (ar < 20) & (area / (area0 + 1e-16) > 0.2)
+            box_info.boxes = cropped_boxes[i]
+            if box_info.labels is not None and len(box_info.labels) > 0:
+                box_info.labels = box_info.labels[i]
+            if box_info.weights is not None and len(box_info.weights) > 0:
+                box_info.weights = box_info.weights[i]
+        return box_info
+
+
+class OneOf(BasicTransform):
     def __init__(self, transforms, **kwargs):
+        kwargs['p'] = 1.0
         super(OneOf, self).__init__(**kwargs)
-        self.p = 1
-        if isinstance(transforms[0], DetectAugment):
+        if isinstance(transforms[0], BasicTransform):
             prob = float(1 / len(transforms))
             transforms = [(prob, transform) for transform in transforms]
         probs, transforms = zip(*transforms)
         probs, transforms = list(probs), list(transforms)
-        for item in probs:
-            assert item > 0, "prob > 0"
-        assert np.sum(probs) == 1.0, 'sum of prob should be equal to 1'
-        probs.insert(0, 0)
-        self.flag = np.cumsum(probs)[:-1]
+        self.probs = probs
         self.transforms = transforms
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
-        p = np.random.uniform(0, 1)
-        index = (self.flag < p).sum() - 1
-        img = self.transforms[index].img_aug(img)
-        return img
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        p = np.random.uniform(0, 1)
-        index = (self.flag < p).sum() - 1
-        img, labels = self.transforms[index](img, labels)
-        return img, labels
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
+        index = np.random.choice(a=range(len(self.probs)), p=self.probs)
+        box_info = self.transforms[index](box_info)
+        return box_info
 
 
-class Compose(DetectAugment):
-    """
-    串行数据增强的方式
-    """
-
+class Compose(BasicTransform):
     def __init__(self, transforms, **kwargs):
+        kwargs['p'] = 1.0
         super(Compose, self).__init__(**kwargs)
         self.transforms = transforms
-        self.p = 1
 
-    def img_aug(self, img: np.ndarray) -> np.ndarray:
+    def aug(self, box_info: BoxInfo) -> BoxInfo:
         for transform in self.transforms:
-            img = transform.img_aug(img)
-            return img
-
-    def aug(self, img: np.ndarray, labels: np.ndarray) -> tuple:
-        for transform in self.transforms:
-            img, labels = transform(img, labels)
-        return img, labels
+            box_info = transform(box_info)
+        return box_info

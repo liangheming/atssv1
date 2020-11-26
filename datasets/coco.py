@@ -1,12 +1,9 @@
 import os
 import torch
-import cv2 as cv
-import numpy as np
+from typing import List
 from torch.utils.data.dataset import Dataset
 from pycocotools.coco import COCO
-from utils.boxs import draw_box, xyxy2xywh
-from utils.augmentations import Compose, OneOf, \
-    ScalePadding, RandNoise, Mosaic, MixUp, RandPerspective, HSV, Identity, LRFlip, RandCutOut
+from utils.augmentations import *
 
 coco_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 31, 32, 33,
             34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
@@ -41,23 +38,22 @@ default_aug_cfg = {
     'hsv_h': 0.014,
     'hsv_s': 0.68,
     'hsv_v': 0.36,
-    'degree': 5,
-    'translate': 0.1,
-    'scale': (0.6, 1.5),
+    'degree': (-10, 10),
+    'translate': 0,
     'shear': 0.0,
-    'beta': 1.5,
-    'pad_val': (103, 116, 123),
-    # 'pad_val': (114, 114, 114)
+    'beta': (8, 8),
 }
 
 rgb_mean = [0.485, 0.456, 0.406]
 rgb_std = [0.229, 0.224, 0.225]
+cv.setNumThreads(0)
 
 
 # noinspection PyTypeChecker
 class COCODataSets(Dataset):
     def __init__(self, img_root, annotation_path,
-                 img_size=640,
+                 # min_threshes=[640],
+                 max_thresh=640,
                  augments=True,
                  use_crowd=True,
                  debug=False,
@@ -67,7 +63,6 @@ class COCODataSets(Dataset):
         """
         :param img_root: 图片根目录
         :param annotation_path: 标注（json）文件的路径
-        :param img_size: 长边的size
         :param augments: 是否进行数据增强
         :param use_crowd: 是否使用crowed的标注
         :param debug: debug模式(少量数据)
@@ -76,39 +71,32 @@ class COCODataSets(Dataset):
         """
         super(COCODataSets, self).__init__()
         self.coco = COCO(annotation_path)
-        self.img_size = img_size
+        # self.min_threshes = min_threshes
+        self.max_thresh = max_thresh
         self.img_root = img_root
         self.use_crowd = use_crowd
         self.remove_blank = remove_blank
-        self.data_len = len(self.coco.imgs.keys())
-        self.img_paths = [None] * self.data_len
-        self.shapes = [None] * self.data_len
-        # [label_weights, label_index, x1, y1, x2, y2]
-        self.labels = [np.zeros((0, 6), dtype=np.float32)] * self.data_len
         self.augments = augments
         if aug_cfg is None:
             aug_cfg = default_aug_cfg
         self.aug_cfg = aug_cfg
         self.debug = debug
         self.empty_images_len = 0
-        valid_len = self.__load_data()
-        if valid_len != self.data_len:
-            print("valid data len: ", valid_len)
-            self.data_len = valid_len
-            self.img_paths = self.img_paths[:valid_len]
-            self.shapes = self.shapes[:valid_len]
-            self.labels = self.labels[:valid_len]
+        data_len = len(self.coco.imgs.keys())
+        box_info_list = self.__load_data()
+        self.box_info_list = box_info_list
+        if len(box_info_list) != data_len:
+            print("all data len:{:d} | valid data len:{:d}".format(data_len, len(box_info_list)))
+
         if self.debug:
-            assert debug <= valid_len, "not enough data to debug"
+            assert debug <= len(box_info_list), "not enough data to debug"
             print("debug")
-            self.img_paths = self.img_paths[:debug]
-            self.shapes = self.shapes[:debug]
-            self.labels = self.labels[:debug]
+            self.box_info_list = box_info_list[:debug]
         self.transform = None
         self.set_transform()
 
     def __load_data(self):
-        index = 0
+        box_info_list = list()
         for img_id in self.coco.imgs.keys():
             file_name = self.coco.imgs[img_id]['file_name']
             width, height = self.coco.imgs[img_id]['width'], self.coco.imgs[img_id]['height']
@@ -118,7 +106,6 @@ class COCODataSets(Dataset):
                 continue
 
             assert width > 1 and height > 1, "invalid width or heights"
-
             anns = self.coco.imgToAnns[img_id]
             label_list = list()
             for ann in anns:
@@ -136,110 +123,96 @@ class COCODataSets(Dataset):
                     continue
                 if x1 < 0 or x2 > width or y1 < 0 or y2 > height:
                     print("warning box ", box)
-                label_list.append((1., label_id, x1, y1, x2, y2))
-            if self.remove_blank:
-                if len(label_list) < 1:
-                    self.empty_images_len += 1
-                    continue
-            if label_list:
-                self.labels[index] = np.array(label_list, dtype=np.float32)
-
-            self.img_paths[index] = file_path
-            self.shapes[index] = (width, height)
-            index += 1
-        return index
+                label_list.append((label_id, x1, y1, x2, y2))
+            valid_box_len = len(label_list)
+            if valid_box_len == 0:
+                box_info = BoxInfo(img_path=file_path, boxes=np.zeros((0, 4)), labels=np.zeros((0,)),
+                                   weights=np.ones(shape=(0,)))
+            else:
+                label_info = np.array(label_list)
+                box_info = BoxInfo(img_path=file_path, boxes=label_info[:, 1:], labels=label_info[:, 0],
+                                   weights=np.ones_like(label_info[:, 0]))
+            if self.remove_blank and valid_box_len == 0:
+                self.empty_images_len += 1
+                continue
+            box_info_list.append(box_info)
+        return box_info_list
 
     def __getitem__(self, item):
-        img_path, label = self.img_paths[item], self.labels[item]
-        img = cv.imread(img_path)
-        img, label = self.transform(img, label)
-        if self.debug:
-            import uuid
-            ret_img = draw_box(img, label, colors, coco_names)
-            cv.imwrite("{:d}_{:s}.jpg".format(item, str(uuid.uuid4()).replace('-', "")), ret_img)
-        label_num = len(label)
-        if label_num:
-            # [weight,label,x1,y1,x2,y2]
-            label[:, [3, 5]] /= img.shape[0]  # height
-            label[:, [2, 4]] /= img.shape[1]
-        img_out = img[:, :, [2, 1, 0]].astype(np.float32) / 255.0
-        img_out = ((img_out - np.array(rgb_mean)) / np.array(rgb_std)).transpose(2, 0, 1).astype(np.float32)
-        img_out = np.ascontiguousarray(img_out)
-        assert not np.any(np.isnan(img_out)), "invalid input"
-        labels_out = torch.zeros((label_num, 7))
-        if label_num:
-            labels_out[:, 1:] = torch.from_numpy(label)
-        return torch.from_numpy(img_out).float(), labels_out, self.img_paths[item]
-
-    def set_transform(self):
-        if self.augments:
-            self.transform = Compose(transforms=[
-                OneOf(transforms=[
-                    (0.6, Compose(transforms=[
-                        OneOf(transforms=[Identity(),
-                                          HSV(p=1,
-                                              hgain=self.aug_cfg['hsv_h'],
-                                              sgain=self.aug_cfg['hsv_s'],
-                                              vgain=self.aug_cfg['hsv_v']),
-                                          RandNoise()
-                                          ]),
-                        RandCutOut(),
-                        ScalePadding(target_size=self.img_size, padding_val=self.aug_cfg['pad_val']),
-                        RandPerspective(target_size=(self.img_size, self.img_size),
-                                        scale=self.aug_cfg['scale'],
-                                        degree=self.aug_cfg['degree'],
-                                        translate=self.aug_cfg['translate'],
-                                        shear=self.aug_cfg['shear'],
-                                        pad_val=self.aug_cfg['pad_val'])])),
-                    (0.4, Mosaic(self.img_paths,
-                                 self.labels,
-                                 color_gitter=OneOf(transforms=[Identity(),
-                                                                HSV(p=1,
-                                                                    hgain=self.aug_cfg['hsv_h'],
-                                                                    sgain=self.aug_cfg['hsv_s'],
-                                                                    vgain=self.aug_cfg['hsv_v']),
-                                                                RandNoise()]),
-                                 target_size=self.img_size,
-                                 pad_val=self.aug_cfg['pad_val']))
-                ]),
-
-                LRFlip()])
-        else:
-            self.transform = ScalePadding(target_size=(self.img_size, self.img_size),
-                                          padding_val=self.aug_cfg['pad_val'])
-
-    def __len__(self):
-        return len(self.img_paths)
+        box_info = self.box_info_list[item].clone().load_img()
+        box_info = self.transform(box_info)
+        # assert box_info.img.dtype == np.uint8
+        # import uuid
+        # ret_img = box_info.draw_box(colors, coco_names)
+        # file_name = str(uuid.uuid4()).replace("-", "")
+        # cv.imwrite("{:s}.jpg".format(file_name), ret_img)
+        return box_info
 
     @staticmethod
-    def collate_fn(batch):
-        """
-        :param batch:
-        :return: images shape[bs,3,h,w] targets[bs,7] (bs_idx,weights,label_idx,x1,y1,x2,y2)
-        """
-        img, label, path = zip(*batch)  # transposed
-        for i, l in enumerate(label):
-            l[:, 0] = i  # add target image index for build_targets()
-        return torch.stack(img, 0), torch.cat(label, 0), path
+    def collect_fn(batch: List[BoxInfo]):
+        batch_img = list()
+        batch_target = list()
+        batch_length = list()
+        for item in batch:
+            img = (item.img[:, :, ::-1] / 255.0 - np.array(rgb_mean)) / np.array(rgb_std)
+            batch_img.append(img)
+            target = np.concatenate([item.labels[:, None], item.boxes], axis=-1)
+            batch_target.append(target)
+            batch_length.append(len(target))
+        batch_img = torch.from_numpy(np.stack(batch_img, axis=0)).permute(0, 3, 1, 2).contiguous().float()
+        batch_target = torch.from_numpy(np.concatenate(batch_target, axis=0)).float()
+        return batch_img, batch_target, batch_length
 
+    def __len__(self):
+        return len(self.box_info_list)
 
-if __name__ == '__main__':
-    from torch.utils.data.dataloader import DataLoader
+    def set_transform(self):
+        color_gitter = OneOf(
+            transforms=[
+                Identity(),
+                RandHSV(hgain=self.aug_cfg['hsv_h'],
+                        vgain=self.aug_cfg['hsv_v'],
+                        sgain=self.aug_cfg['hsv_s']),
+                RandBlur().reset(p=0.5),
+                RandNoise().reset(p=0.5)
+            ]
+        )
+        basic_transform = Compose(
+            transforms=[
+                color_gitter,
+                RandCrop(min_thresh=0.6, max_thresh=1.0).reset(p=0.2),
+                RandScaleToMax(max_threshes=[self.max_thresh]),
+                RandPerspective(degree=self.aug_cfg['degree'], scale=(0.6, 1.2))
+            ]
+        )
 
-    dataset = COCODataSets(img_root="/home/huffman/data/val2017",
-                           annotation_path="/home/huffman/data/annotations/instances_val2017.json",
-                           use_crowd=True,
-                           augments=True,
-                           debug=60
-                           )
-    dataloader = DataLoader(dataset=dataset, batch_size=16, shuffle=True, num_workers=4, collate_fn=dataset.collate_fn)
-    for img_tensor, target_tensor, _ in dataloader:
-        for weights in target_tensor[:, 1].unique():
-            nonzero_index = torch.nonzero((target_tensor[:, 1] == weights), as_tuple=True)
-            print(target_tensor[nonzero_index].shape)
-        print("=" * 20)
-    for img_tensor, target_tensor, _ in dataloader:
-        for weights in target_tensor[:, 1].unique():
-            nonzero_index = torch.nonzero((target_tensor[:, 1] == weights), as_tuple=True)
-            print(target_tensor[nonzero_index].shape)
-        print("=" * 20)
+        mosaic = MosaicWrapper(candidate_box_info=self.box_info_list,
+                               sizes=[self.max_thresh],
+                               color_gitter=color_gitter)
+
+        mix_up = MixUpWrapper(candidate_box_info=self.box_info_list,
+                              beta=self.aug_cfg['beta'],
+                              color_gitter=Compose(
+                                  transforms=[
+                                      color_gitter,
+                                      RandScaleMinMax(min_threshes=[self.max_thresh],
+                                                      max_thresh=self.max_thresh),
+                                  ]
+                              ))
+
+        augment_transform = Compose(
+            transforms=[
+                OneOf(transforms=[
+                    (0.2, basic_transform),
+                    (0.0, mix_up),
+                    (0.8, mosaic)
+                ]),
+                LRFlip().reset(p=0.5)
+            ]
+        )
+        std_transform = RandScaleToMax(max_threshes=[self.max_thresh])
+
+        if self.augments:
+            self.transform = augment_transform
+        else:
+            self.transform = std_transform

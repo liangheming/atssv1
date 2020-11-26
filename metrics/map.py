@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from utils.boxs import box_iou
+from utils.boxs_utils import box_iou
 
 
 def compute_ap(recall, precision):
