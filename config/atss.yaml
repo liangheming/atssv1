@@ -24,7 +24,7 @@ model:
   gamma: 2.0
   iou_type: giou
   iou_loss_weight: 0.5
-  reg_loss_weight: 1.3
+  reg_loss_weight: 1.15
   iou_loss_type: centerness
   conf_thresh: 0.05
   nms_iou_thresh: 0.5

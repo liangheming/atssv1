@@ -27,7 +27,7 @@ def coco_eavl(anno_path="/home/huffman/data/annotations/instances_val2017.json",
 
 
 @torch.no_grad()
-def eval_model(weight_path="weights/paa_resnet50_last.pth", device="cuda:0"):
+def eval_model(weight_path="weights/atss_retina_resnet50_last.pth", device="cuda:0"):
     from pycocotools.coco import COCO
     device = torch.device(device)
     with open("config/atss.yaml", 'r') as rf:
