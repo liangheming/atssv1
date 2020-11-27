@@ -119,3 +119,5 @@ nohup python -m torch.distributed.launch --nproc_per_node=4 main.py >>train.log 
 - [ ] VOC data train\test scripts
 - [ ] custom data train\test scripts
 - [ ] MobileNet Backbone support
+## Special Thanks
+many helps from this work,[Edwardwaw/atss_retinanet](https://github.com/Edwardwaw/atss_retinanet) (mAP 39.4)
