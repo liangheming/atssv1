@@ -27,12 +27,12 @@ def coco_eavl(anno_path="/home/huffman/data/annotations/instances_val2017.json",
 
 
 @torch.no_grad()
-def eval_model(weight_path="weights/atss_retina_resnet50_last.pth", device="cuda:0"):
+def eval_model(weight_path="weights/atss_retina_resnet50_last.pth", device="cuda:5"):
     from pycocotools.coco import COCO
     device = torch.device(device)
     with open("config/atss.yaml", 'r') as rf:
         cfg = yaml.safe_load(rf)
-    net = RetinaNet(**{**cfg['model'], 'pretrained': False})
+    net = RetinaNet(**{**cfg['model'], 'pretrained': False, "nms_iou_thresh": 0.6})
     net.load_state_dict(torch.load(weight_path, map_location="cpu")['ema'])
     net.to(device)
     net.eval().half()
@@ -56,7 +56,7 @@ def eval_model(weight_path="weights/atss_retina_resnet50_last.pth", device="cuda
         predict = net(img_inp)["predicts"][0]
         duration = time.time() - tic
         time_logger.update(duration)
-        pbar.set_description("fps:{:4.2f}".format(1/time_logger.avg()))
+        pbar.set_description("fps:{:4.2f}".format(1 / time_logger.avg()))
         if predict is None:
             continue
         predict[:, [0, 2]] = ((predict[:, [0, 2]] - left) / ratio).clamp(min=0, max=w)
